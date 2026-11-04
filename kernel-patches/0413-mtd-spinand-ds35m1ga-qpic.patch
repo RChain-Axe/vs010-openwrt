@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RChain-Axe <noreply@github.com>
+Date: Wed, 4 Nov 2026 00:00:00 +0800
+Subject: [PATCH] mtd: spinand: support DS35M1GA on QPIC NAND controller
+
+The DS35M1GA (raw ID e521e52100) exists in the Dosilicon chip table but
+fails to probe on IPQ5018 QPIC NAND controller. QPIC reads chip ID via
+hardware register rather than SPI command sequence, causing the
+rdid_method check to reject the chip.
+
+This patch:
+1. Adds DS35M1GA entry with OPCODE_ONLY method (in case QPIC uses it)
+2. Relaxed the method check so zero-method entries always match
+
+---
+ drivers/mtd/nand/spi/core.c    | 3 ++-
+ drivers/mtd/nand/spi/dosilicon.c | 11 +++++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+--- a/drivers/mtd/nand/spi/core.c
++++ b/drivers/mtd/nand/spi/core.c
+@@ -1426,7 +1426,8 @@ int spinand_match_and_init(struct spinand
+ 	for (i = 0; i < table_size; i++) {
+ 		const struct spinand_info *info = &table[i];
+
+-		if (rdid_method != info->devid.method)
++		/* QPIC reads ID via register; allow entries with method=0 */
++		if (info->devid.method && rdid_method != info->devid.method)
+ 			continue;
+
+ 		if (memcmp(id + 1, info->devid.id, min(3, info->devid.len)))
+--- a/drivers/mtd/nand/spi/dosilicon.c
++++ b/drivers/mtd/nand/spi/dosilicon.c
+@@ -70,6 +70,17 @@ SPINAND_INFO("DS35Q1GA",
+ 		SPINAND_HAS_QE_BIT,
+ 		SPINAND_ECCINFO(&ds35xx_ooblayout, NULL)),
++
++	/* DS35M1GA as seen on QPIC (raw ID e5 21 e5 21 00) */
++	SPINAND_INFO("DS35M1GA-QPIC",
++		SPINAND_ID(SPINAND_READID_METHOD_OPCODE_ONLY, 0x21),
++		NAND_MEMORG(1, 2048, 64, 64, 1024, 20, 1, 1, 1),
++		NAND_ECCREQ(4, 512),
++		SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
++					 &write_cache_variants,
++					 &update_cache_variants),
++		SPINAND_HAS_QE_BIT,
++		SPINAND_ECCINFO(&ds35xx_ooblayout, NULL)),
+ 	SPINAND_INFO("DS35M1GA",
+ 		SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0x21),
+ 		NAND_MEMORG(1, 2048, 64, 64, 1024, 20, 1, 1, 1),
