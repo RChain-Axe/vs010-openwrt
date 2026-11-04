@@ -1,43 +1,110 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: RChain-Axe <noreply@github.com>
 Date: Wed, 4 Nov 2026 00:00:00 +0800
-Subject: [PATCH] mtd: spinand: support DS35M1GA on QPIC NAND controller
+Subject: [PATCH] mtd: spinand: add Dosilicon DS35M1GA support for QPIC
 
-The DS35M1GA (raw ID e521e52100) exists in the Dosilicon chip table but
-fails to probe on IPQ5018 QPIC NAND controller. QPIC reads chip ID via
-hardware register rather than SPI command sequence, causing the
-rdid_method check to reject the chip.
+The DS35M1GA (raw ID e521e52100 on IPQ5018 QPIC NAND controller) is not
+recognized by mainline spi-nand because the QPIC controller reads chip ID
+via hardware register and the rdid_method does not match the chip table.
 
 This patch:
-1. Adds DS35M1GA entry with OPCODE_ONLY method (in case QPIC uses it)
-2. Relaxed the method check so zero-method entries always match
+1. Creates drivers/mtd/nand/spi/dosilicon.c with DS35M1GA entry
+2. Uses method=0 (OPCODE_ADDR) so the rdid_method check is skipped
+3. Relaxes core.c method check to allow method=0 entries to always match
 
----
- drivers/mtd/nand/spi/core.c    | 3 ++-
- drivers/mtd/nand/spi/dosilicon.c | 11 +++++++++++
- 2 files changed, 13 insertions(+), 1 deletion(-)
-
+--- a/drivers/mtd/nand/spi/Makefile
++++ b/drivers/mtd/nand/spi/Makefile
+@@ -1,5 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0
+ spinand-objs := core.o otp.o
+-spinand-objs += alliancememory.o ato.o esmt.o etron.o fmsh.o foresee.o gigadevice.o heyangtek.o
++spinand-objs += alliancememory.o ato.o dosilicon.o esmt.o etron.o fmsh.o foresee.o gigadevice.o heyangtek.o
+ spinand-objs += macronix.o micron.o paragon.o skyhigh.o toshiba.o winbond.o xtx.o
+ obj-$(CONFIG_MTD_SPI_NAND) += spinand.o
 --- a/drivers/mtd/nand/spi/core.c
 +++ b/drivers/mtd/nand/spi/core.c
-@@ -1426,7 +1426,8 @@ int spinand_match_and_init(struct spinand
+@@ -1247,6 +1247,7 @@ static const struct spinand_manufacturer
+ 	&ato_spinand_manufacturer,
+ 	&esmt_8c_spinand_manufacturer,
+ 	&esmt_c8_spinand_manufacturer,
++	&dosilicon_spinand_manufacturer,
+ 	&etron_spinand_manufacturer,
+ 	&fmsh_spinand_manufacturer,
+ 	&foresee_spinand_manufacturer,
+--- a/drivers/mtd/nand/spi/core.c
++++ b/drivers/mtd/nand/spi/core.c
+@@ -1425,7 +1426,8 @@ int spinand_match_and_init(struct spinand
  	for (i = 0; i < table_size; i++) {
  		const struct spinand_info *info = &table[i];
 
 -		if (rdid_method != info->devid.method)
-+		/* QPIC reads ID via register; allow entries with method=0 */
++		/* QPIC reads ID via register; allow method=0 entries to match any */
 +		if (info->devid.method && rdid_method != info->devid.method)
  			continue;
 
  		if (memcmp(id + 1, info->devid.id, min(3, info->devid.len)))
---- a/drivers/mtd/nand/spi/dosilicon.c
+--- /dev/null
 +++ b/drivers/mtd/nand/spi/dosilicon.c
-@@ -70,6 +70,17 @@ SPINAND_INFO("DS35Q1GA",
- 		SPINAND_HAS_QE_BIT,
- 		SPINAND_ECCINFO(&ds35xx_ooblayout, NULL)),
+@@ -0,0 +1,82 @@
++// SPDX-License-Identifier: GPL-2.0
 +
-+	/* DS35M1GA as seen on QPIC (raw ID e5 21 e5 21 00) */
-+	SPINAND_INFO("DS35M1GA-QPIC",
-+		SPINAND_ID(SPINAND_READID_METHOD_OPCODE_ONLY, 0x21),
++#include <linux/device.h>
++#include <linux/kernel.h>
++#include <linux/mtd/spinand.h>
++
++#define SPINAND_MFR_DOSILICON		0xe5
++
++static SPINAND_OP_VARIANTS(read_cache_variants,
++		SPINAND_PAGE_READ_FROM_CACHE_QUADIO_OP(0, 1, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_IO_OP(0, 1, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_RANDOM_OP(0, 1, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_FAST_OP(0, 1, NULL, 0, 0),
++		SPINAND_PAGE_READ_FROM_CACHE_1BIT_OP(0, 1, NULL, 0, 0));
++
++static SPINAND_OP_VARIANTS(write_cache_variants,
++		SPINAND_PROG_LOAD_QUADIO_OP(true, 0, NULL, 0),
++		SPINAND_PROG_LOAD_IO_OP(true, 0, NULL, 0),
++		SPINAND_PROG_LOAD_RANDOM_OP(true, 0, NULL, 0),
++		SPINAND_PROG_LOAD_1BIT_OP(true, 0, NULL, 0));
++
++static SPINAND_OP_VARIANTS(update_cache_variants,
++		SPINAND_PROG_LOAD_QUADIO_OP(false, 0, NULL, 0),
++		SPINAND_PROG_LOAD_IO_OP(false, 0, NULL, 0),
++		SPINAND_PROG_LOAD_RANDOM_OP(false, 0, NULL, 0),
++		SPINAND_PROG_LOAD_1BIT_OP(false, 0, NULL, 0));
++
++static int ds35xx_ooblayout_ecc(struct mtd_info *mtd, int section,
++				 struct mtd_oob_region *oobregion)
++{
++	if (section)
++		return -ERANGE;
++
++	oobregion->offset = 64;
++	oobregion->length = 0;
++
++	return 0;
++}
++
++static int ds35xx_ooblayout_free(struct mtd_info *mtd, int section,
++				  struct mtd_oob_region *oobregion)
++{
++	if (section)
++		return -ERANGE;
++
++	oobregion->offset = 0;
++	oobregion->length = 64;
++
++	return 0;
++}
++
++static const struct mtd_ooblayout_ops ds35xx_ooblayout = {
++	.ecc = ds35xx_ooblayout_ecc,
++	.free = ds35xx_ooblayout_free,
++};
++
++static const struct spinand_info dosilicon_spinand_table[] = {
++	SPINAND_INFO("DS35M1GA",
++		SPINAND_ID(SPINAND_READID_METHOD_OPCODE_ADDR, 0x21),
 +		NAND_MEMORG(1, 2048, 64, 64, 1024, 20, 1, 1, 1),
 +		NAND_ECCREQ(4, 512),
 +		SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
@@ -45,6 +112,25 @@ This patch:
 +					 &update_cache_variants),
 +		SPINAND_HAS_QE_BIT,
 +		SPINAND_ECCINFO(&ds35xx_ooblayout, NULL)),
- 	SPINAND_INFO("DS35M1GA",
- 		SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0x21),
- 		NAND_MEMORG(1, 2048, 64, 64, 1024, 20, 1, 1, 1),
++};
++
++static const struct spinand_manufacturer_ops dosilicon_spinand_manuf_ops = {
++};
++
++const struct spinand_manufacturer dosilicon_spinand_manufacturer = {
++	.id = SPINAND_MFR_DOSILICON,
++	.name = "Dosilicon",
++	.chips = dosilicon_spinand_table,
++	.nchips = ARRAY_SIZE(dosilicon_spinand_table),
++	.ops = &dosilicon_spinand_manuf_ops,
++};
+--- a/include/linux/mtd/spinand.h
++++ b/include/linux/mtd/spinand.h
+@@ -363,6 +363,7 @@ extern const struct spinand_manufacturer
+ extern const struct spinand_manufacturer ato_spinand_manufacturer;
+ extern const struct spinand_manufacturer esmt_8c_spinand_manufacturer;
+ extern const struct spinand_manufacturer esmt_c8_spinand_manufacturer;
++extern const struct spinand_manufacturer dosilicon_spinand_manufacturer;
+ extern const struct spinand_manufacturer etron_spinand_manufacturer;
+ extern const struct spinand_manufacturer fmsh_spinand_manufacturer;
+ extern const struct spinand_manufacturer foresee_spinand_manufacturer;
